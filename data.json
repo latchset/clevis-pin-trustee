@@ -1,0 +1,5 @@
+{
+	"url": [ "http://localhost:8080" ],
+	"resource_repository": "conf-cluster",
+	"resource_type": "root"
+}
