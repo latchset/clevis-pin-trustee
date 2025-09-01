@@ -1,9 +1,9 @@
 [package]
 name = "clevis-pin-trustee"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 description = "Clevis PIN for URL-based encryption/decryption"
-repository = "https://github.com/yourusername/clevis-pin-trustee"
+repository = "https://github.com/confidential-clusters/clevis-pin-trustee"
 
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }

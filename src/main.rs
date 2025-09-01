@@ -9,20 +9,23 @@ use std::process::Command as StdCommand;
 use std::thread;
 use std::time::Duration;
 
+#[derive(Debug, Serialize, Deserialize, Clone)]
+struct Server {
+    url: String,
+    cert: String,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 struct Config {
-    url: Vec<String>,
-    resource_repository: String,
-    resource_type: String,
+    servers: Vec<Server>,
+    path: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 struct ClevisHeader {
     pin: String,
-    url: Vec<String>,
-    resource_repository: String,
-    resource_type: String,
-    resource_tag: String,
+    servers: Vec<Server>,
+    path: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -32,12 +35,10 @@ pub struct Key {
 }
 
 fn fetch_and_prepare_jwk(
-    urls: &[String],
-    resource_repository: &str,
-    resource_type: &str,
-    resource_tag: &str,
+    servers: &[Server],
+    path: &str,
 ) -> Result<Jwk> {
-    let key = fetch_luks_key(urls, resource_repository, resource_type, resource_tag)?;
+    let key = fetch_luks_key(servers, path)?;
     let key = String::from_utf8(
         general_purpose::STANDARD
             .decode(&key)
@@ -61,13 +62,9 @@ fn encrypt(config: &str) -> Result<()> {
     let mut input = Vec::new();
     io::stdin().read_to_end(&mut input)?;
 
-    // TODO: the id needs to be generated for every node
-    let tag = "machine".to_string();
     let jwk = fetch_and_prepare_jwk(
-        &config.url,
-        &config.resource_repository,
-        &config.resource_type,
-        &tag,
+        &config.servers,
+        &config.path,
     )?;
 
     eprintln!("{}", jwk.to_string());
@@ -77,10 +74,8 @@ fn encrypt(config: &str) -> Result<()> {
 
     let private_hdr = ClevisHeader {
         pin: "trustee".to_string(),
-        url: config.url.clone(),
-        resource_repository: config.resource_repository,
-        resource_type: config.resource_type,
-        resource_tag: tag,
+        servers: config.servers.clone(),
+        path: config.path,
     };
 
     let mut hdr = josekit::jwe::JweHeader::new();
@@ -116,10 +111,8 @@ fn decrypt() -> Result<()> {
     eprintln!("Decrypt with header: {:?}", hdr_clevis);
 
     let decrypter_jwk = fetch_and_prepare_jwk(
-        &hdr_clevis.url,
-        &hdr_clevis.resource_repository,
-        &hdr_clevis.resource_type,
-        &hdr_clevis.resource_tag,
+        &hdr_clevis.servers,
+        &hdr_clevis.path,
     )?;
 
     let decrypter = Dir
@@ -136,15 +129,13 @@ fn decrypt() -> Result<()> {
 }
 
 fn fetch_luks_key(
-    urls: &[String],
-    resource_repository: &str,
-    resource_type: &str,
-    resource_tag: &str,
+    servers: &[Server],
+    path: &str,
 ) -> Result<String> {
     const MAX_ATTEMPTS: u32 = 3;
     const DELAY: Duration = Duration::from_secs(5);
 
-    if urls.is_empty() {
+    if servers.is_empty() {
         return Err(anyhow!("No URLs provided"));
     }
 
@@ -155,15 +146,15 @@ fn fetch_luks_key(
                 attempt, MAX_ATTEMPTS
             );
 
-            for (url_index, url) in urls.iter().enumerate() {
-                eprintln!("Trying URL {}/{}: {}", url_index + 1, urls.len(), url);
-                match try_fetch_luks_key(url, resource_repository, resource_type, resource_tag) {
+            for (index, server) in servers.iter().enumerate() {
+                eprintln!("Trying URL {}/{}: {}", index + 1, servers.len(), server.url);
+                match try_fetch_luks_key(&server.url, path) {
                     Ok(key) => {
-                        eprintln!("Successfully fetched LUKS key from URL: {}", url);
+                        eprintln!("Successfully fetched LUKS key from URL: {}", server.url);
                         return Some(Ok(key));
                     }
                     Err(e) => {
-                        eprintln!("Error with URL {}: {}", url, e);
+                        eprintln!("Error with URL {}: {}", server.url, e);
                     }
                 }
             }
@@ -184,19 +175,14 @@ fn fetch_luks_key(
 
 fn try_fetch_luks_key(
     url: &str,
-    resource_repository: &str,
-    resource_type: &str,
-    resource_tag: &str,
+    path: &str,
 ) -> Result<String> {
     let output = StdCommand::new("trustee-attester")
         .arg("--url")
         .arg(url)
         .arg("get-resource")
         .arg("--path")
-        .arg(format!(
-            "{}/{}/{}",
-            resource_repository, resource_type, resource_tag
-        ))
+        .arg(path)
         .output()
         .map_err(|e| anyhow!("Failed to execute trustee-attester: {}", e))?;
 

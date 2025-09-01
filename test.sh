@@ -1,13 +1,16 @@
 #!/bin/bash
 
-device=$(sudo losetup  |grep test.img | awk '{print $1}'|head -n1)
+set -euo pipefail
+
+device=$(sudo losetup  |grep test.img | awk '{print $1}'|head -n1 || true)
 if [ -z "$device" ]; then
 	truncate test.img --size 1GB
 	device=$(sudo losetup -f --show test.img)
 fi
 echo "Device $device"
 echo "cLevisTest1234" > key
-if [ ! $(sudo cryptsetup isLuks $device) ]; then
+sudo cryptsetup isLuks $device
+if [ $? -ne 0 ]; then
 	yes "YES"| sudo cryptsetup luksFormat -d key --force-password $device
 fi
 sudo clevis luks bind -f -k key -d $device trustee "$(cat data.json)"
