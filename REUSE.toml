@@ -1,0 +1,13 @@
+version = 1
+
+[[annotations]]
+path = [
+  "README.md",
+  "Cargo.lock",
+  "data.json",
+  "test-secret-trustee"
+]
+SPDX-FileCopyrightText = [
+    "Alice Frosi <afrosi@redhat.com>"
+]
+SPDX-License-Identifier = "CC0-1.0"

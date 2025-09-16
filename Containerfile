@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: Alice Frosi <afrosi@redhat.com>
+#
+# SPDX-License-Identifier: CC0-1.0
+
 FROM docker.io/library/rust:trixie as build
 
 COPY . /src

@@ -1,5 +1,9 @@
 #!/bin/bash
 
+# SPDX-FileCopyrightText: Alice Frosi <afrosi@redhat.com>
+#
+# SPDX-License-Identifier: CC0-1.0
+
 set -euo pipefail
 
 device=$(sudo losetup  |grep test.img | awk '{print $1}'|head -n1 || true)

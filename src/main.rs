@@ -1,3 +1,7 @@
+// SPDX-FileCopyrightText: Alice Frosi <afrosi@redhat.com>
+//
+// SPDX-License-Identifier: MIT
+
 use anyhow::{anyhow, Context, Result};
 use base64::{engine::general_purpose, Engine as _};
 use clap::{Parser, Subcommand};
