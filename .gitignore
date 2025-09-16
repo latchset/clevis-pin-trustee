@@ -1,0 +1,17 @@
+# SPDX-FileCopyrightText: Alice Frosi <afrosi@redhat.com>
+#
+# SPDX-License-Identifier: CC0-1.0
+
+# Rust build artifacts
+/target/
+Cargo.lock
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Temporary files
+*.tmp
+*.temp
