@@ -2,8 +2,8 @@
 //
 // SPDX-License-Identifier: MIT
 
-use anyhow::{anyhow, Context, Result};
-use base64::{engine::general_purpose, Engine as _};
+use anyhow::{Context, Result, anyhow};
+use base64::{Engine as _, engine::general_purpose};
 use clap::{Parser, Subcommand};
 use josekit::jwe::alg::direct::DirectJweAlgorithm::Dir;
 use josekit::jwk::Jwk;
@@ -38,10 +38,7 @@ pub struct Key {
     pub key: String,
 }
 
-fn fetch_and_prepare_jwk(
-    servers: &[Server],
-    path: &str,
-) -> Result<Jwk> {
+fn fetch_and_prepare_jwk(servers: &[Server], path: &str) -> Result<Jwk> {
     let key = fetch_luks_key(servers, path)?;
     let key = String::from_utf8(
         general_purpose::STANDARD
@@ -66,10 +63,7 @@ fn encrypt(config: &str) -> Result<()> {
     let mut input = Vec::new();
     io::stdin().read_to_end(&mut input)?;
 
-    let jwk = fetch_and_prepare_jwk(
-        &config.servers,
-        &config.path,
-    )?;
+    let jwk = fetch_and_prepare_jwk(&config.servers, &config.path)?;
 
     eprintln!("{}", jwk.to_string());
     let encrypter = Dir
@@ -114,10 +108,7 @@ fn decrypt() -> Result<()> {
 
     eprintln!("Decrypt with header: {:?}", hdr_clevis);
 
-    let decrypter_jwk = fetch_and_prepare_jwk(
-        &hdr_clevis.servers,
-        &hdr_clevis.path,
-    )?;
+    let decrypter_jwk = fetch_and_prepare_jwk(&hdr_clevis.servers, &hdr_clevis.path)?;
 
     let decrypter = Dir
         .decrypter_from_jwk(&decrypter_jwk)
@@ -132,10 +123,7 @@ fn decrypt() -> Result<()> {
     Ok(())
 }
 
-fn fetch_luks_key(
-    servers: &[Server],
-    path: &str,
-) -> Result<String> {
+fn fetch_luks_key(servers: &[Server], path: &str) -> Result<String> {
     const MAX_ATTEMPTS: u32 = 3;
     const DELAY: Duration = Duration::from_secs(5);
 
@@ -164,7 +152,10 @@ fn fetch_luks_key(
             }
 
             if attempt < MAX_ATTEMPTS {
-                eprintln!("All URLs failed for attempt {}. Retrying in {:?} seconds...", attempt, DELAY);
+                eprintln!(
+                    "All URLs failed for attempt {}. Retrying in {:?} seconds...",
+                    attempt, DELAY
+                );
                 thread::sleep(DELAY);
             }
             None
@@ -177,10 +168,7 @@ fn fetch_luks_key(
         })
 }
 
-fn try_fetch_luks_key(
-    url: &str,
-    path: &str,
-) -> Result<String> {
+fn try_fetch_luks_key(url: &str, path: &str) -> Result<String> {
     let output = StdCommand::new("trustee-attester")
         .arg("--url")
         .arg(url)
