@@ -6,7 +6,6 @@ FROM ghcr.io/confidential-clusters/buildroot:latest AS build
 
 COPY . /src
 WORKDIR /src
-RUN dnf install -y rust cargo
 RUN cargo build --release
 
 FROM scratch
