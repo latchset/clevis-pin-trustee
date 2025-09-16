@@ -5,7 +5,7 @@
 name: "Build and push clevis-pin-trustee container image"
 
 env:
-  NAME: "clevis-trustee-pin"
+  NAME: "clevis-pin-trustee"
   REGISTRY: "quay.io/confidential-clusters"
 
 on:
