@@ -65,7 +65,7 @@ fn encrypt(config: &str) -> Result<()> {
 
     let jwk = fetch_and_prepare_jwk(&config.servers, &config.path)?;
 
-    eprintln!("{}", jwk.to_string());
+    eprintln!("{}", jwk);
     let encrypter = Dir
         .encrypter_from_jwk(&jwk)
         .context("Error creating direct encrypter")?;
@@ -101,7 +101,7 @@ fn decrypt() -> Result<()> {
     io::stdin().read_to_end(&mut input)?;
     let input = std::str::from_utf8(&input).context("Input is not valid UTF-8")?;
 
-    let hdr = josekit::jwt::decode_header(&input).context("Error decoding header")?;
+    let hdr = josekit::jwt::decode_header(input).context("Error decoding header")?;
     let hdr_clevis = hdr.claim("clevis").context("Error getting clevis claim")?;
     let hdr_clevis: ClevisHeader =
         serde_json::from_value(hdr_clevis.clone()).context("Error deserializing clevis header")?;
@@ -115,7 +115,7 @@ fn decrypt() -> Result<()> {
         .context("Error creating decrypter")?;
 
     let (payload, _) =
-        josekit::jwe::deserialize_compact(&input, &decrypter).context("Error decrypting JWE")?;
+        josekit::jwe::deserialize_compact(input, &decrypter).context("Error decrypting JWE")?;
 
     io::stdout().write_all(&payload)?;
 
