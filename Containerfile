@@ -6,7 +6,7 @@ FROM ghcr.io/confidential-clusters/buildroot:latest AS build
 
 COPY . /src
 WORKDIR /src
-RUN cargo build --release
+RUN cargo build --release -p clevis-pin-trustee
 
 FROM scratch
 COPY --from=build /src/target/release/clevis-pin-trustee /usr/bin/clevis-pin-trustee

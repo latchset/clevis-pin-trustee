@@ -5,6 +5,7 @@
 use anyhow::{Context, Result, anyhow};
 use base64::{Engine as _, engine::general_purpose};
 use clap::{Parser, Subcommand};
+use clevis_pin_trustee_lib::*;
 use josekit::jwe::alg::direct::DirectJweAlgorithm::Dir;
 use josekit::jwk::Jwk;
 use serde::{Deserialize, Serialize};
@@ -13,29 +14,11 @@ use std::process::Command as StdCommand;
 use std::thread;
 use std::time::Duration;
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
-struct Server {
-    url: String,
-    cert: String,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct Config {
-    servers: Vec<Server>,
-    path: String,
-}
-
 #[derive(Debug, Serialize, Deserialize)]
 struct ClevisHeader {
     pin: String,
     servers: Vec<Server>,
     path: String,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct Key {
-    pub key_type: String,
-    pub key: String,
 }
 
 fn fetch_and_prepare_jwk(servers: &[Server], path: &str) -> Result<Jwk> {

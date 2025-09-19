@@ -1,0 +1,15 @@
+# SPDX-FileCopyrightText: Alice Frosi <afrosi@redhat.com>
+#
+# SPDX-License-Identifier: CC0-1.0
+
+[package]
+name = "clevis-pin-trustee-lib"
+version = "0.1.0"
+description = "Library for Clevis PIN for URL-based encryption/decryption"
+edition.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
