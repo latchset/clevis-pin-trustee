@@ -12,4 +12,9 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+anyhow = "1.0.100"
+env_logger = "0.11.8"
+log = "0.4.28"
 serde.workspace = true
+tss-esapi = "7.6.0"
+
