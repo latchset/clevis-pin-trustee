@@ -14,6 +14,9 @@ use std::process::Command as StdCommand;
 use std::thread;
 use std::time::Duration;
 
+#[cfg(feature = "create_tpm_ak")]
+use tpm_utiles::{detect_tpm_device, create_ctx_with_session, create_primary_ak, persistent_ak};
+
 #[derive(Debug, Serialize, Deserialize)]
 struct ClevisHeader {
     pin: String,
@@ -181,6 +184,25 @@ fn try_fetch_luks_key(url: &str, path: &str) -> Result<String> {
     Ok(key)
 }
 
+
+#[cfg(feature = "create_tpm_ak")]
+fn create_ak(tpm_handler: u32) -> Result<(), Box<dyn std::error::Error>> {
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    let dev = detect_tpm_device().ok_or_else(|| anyhow!("No TPM device found"))?;
+    let mut ctx = create_ctx_with_session(&dev)?;
+    let ak = create_primary_ak(&mut ctx).expect("Failed to create primary AK");
+    persistent_ak(&ak, tpm_handler,ctx).expect("Failed to make AK persistent");
+    Ok(())
+}
+#[cfg(feature = "create_tpm_ak")]
+fn get_tpm_handler() -> u32 {
+    std::env::var("AA_TPM_AK_HANDLE")
+        .ok()
+        .and_then(|val| u32::from_str_radix(&val.trim_start_matches("0x"), 16).ok())
+        .unwrap_or(0x81010002)
+}
+
+
 /// Clevis PIN for confidential cluster
 #[derive(Parser)]
 #[command(name = "clevis-pin-trustee")]
@@ -204,7 +226,12 @@ enum Commands {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
-
+    #[cfg(feature = "create_tpm_ak")] 
+    {
+       let tpm_handler = get_tpm_handler();
+        println!("Creating TPM Attestation Key (AK) and handler at 0x{:x}", tpm_handler);
+       let _ = create_ak(tpm_handler);
+    } 
     match cli.command {
         Commands::Encrypt { config } => encrypt(&config),
         Commands::Decrypt => decrypt(),

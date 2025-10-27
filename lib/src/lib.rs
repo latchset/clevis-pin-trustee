@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Alice Frosi <afrosi@redhat.com>
 //
 // SPDX-License-Identifier: MIT
+pub mod tpm_utiles;
 
 use serde::{Deserialize, Serialize};
 
