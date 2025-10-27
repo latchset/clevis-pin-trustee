@@ -29,4 +29,5 @@ tss-esapi = "7.6.0"
 [dev-dependencies]
 tempfile = "3.0"
 
-
+[features]
+create_tpm_ak = []

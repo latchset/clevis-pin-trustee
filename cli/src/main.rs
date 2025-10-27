@@ -14,6 +14,7 @@ use std::process::Command as StdCommand;
 use std::thread;
 use std::time::Duration;
 
+#[cfg(feature = "create_tpm_ak")]
 use tpm_utiles::{detect_tpm_device, create_ctx_with_session, create_primary_ak, persistent_ak};
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -184,7 +185,7 @@ fn try_fetch_luks_key(url: &str, path: &str) -> Result<String> {
 }
 
 
-
+#[cfg(feature = "create_tpm_ak")]
 fn create_ak(tpm_handler: u32) -> Result<(), Box<dyn std::error::Error>> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     let dev = detect_tpm_device().ok_or_else(|| anyhow!("No TPM device found"))?;
@@ -193,7 +194,13 @@ fn create_ak(tpm_handler: u32) -> Result<(), Box<dyn std::error::Error>> {
     persistent_ak(&ak, tpm_handler,ctx).expect("Failed to make AK persistent");
     Ok(())
 }
-
+#[cfg(feature = "create_tpm_ak")]
+fn get_tpm_handler() -> u32 {
+    std::env::var("AA_TPM_AK_HANDLE")
+        .ok()
+        .and_then(|val| u32::from_str_radix(&val.trim_start_matches("0x"), 16).ok())
+        .unwrap_or(0x81010002)
+}
 
 
 /// Clevis PIN for confidential cluster
@@ -219,8 +226,12 @@ enum Commands {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
-    
-    let _ = create_ak(0x81010002); //TODO: make this an option for the user to chose. 
+    #[cfg(feature = "create_tpm_ak")] 
+    {
+       let tpm_handler = get_tpm_handler();
+        println!("Creating TPM Attestation Key (AK) and handler at 0x{:x}", tpm_handler);
+       let _ = create_ak(tpm_handler);
+    } 
     match cli.command {
         Commands::Encrypt { config } => encrypt(&config),
         Commands::Decrypt => decrypt(),
