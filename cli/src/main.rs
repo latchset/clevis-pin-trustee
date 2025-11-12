@@ -9,6 +9,7 @@ use clevis_pin_trustee_lib::*;
 use josekit::jwe::alg::direct::DirectJweAlgorithm::Dir;
 use josekit::jwk::Jwk;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::io::{self, Read, Write};
 use std::process::Command as StdCommand;
 use std::thread;
@@ -19,10 +20,11 @@ struct ClevisHeader {
     pin: String,
     servers: Vec<Server>,
     path: String,
+    initdata: Option<String>,
 }
 
-fn fetch_and_prepare_jwk(servers: &[Server], path: &str) -> Result<Jwk> {
-    let key = fetch_luks_key(servers, path)?;
+fn fetch_and_prepare_jwk(servers: &[Server], path: &str, initdata: Option<String>) -> Result<Jwk> {
+    let key = fetch_luks_key(servers, path, initdata)?;
     let key = String::from_utf8(
         general_purpose::STANDARD
             .decode(&key)
@@ -42,11 +44,27 @@ fn fetch_and_prepare_jwk(servers: &[Server], path: &str) -> Result<Jwk> {
 fn encrypt(config: &str) -> Result<()> {
     let config: Config =
         serde_json::from_str(config).map_err(|e| anyhow!("Failed to parse config JSON: {}", e))?;
+    let initdata_str = config.initdata.as_ref();
+    let initdata_data: Option<HashMap<String, String>> = initdata_str
+        .map(|s| {
+            serde_json::from_str(s).map_err(|e| anyhow!("Failed to parse config initdata: {e}"))
+        })
+        .transpose()?;
+    let initdata = initdata_data
+        .map(|data| {
+            toml::to_string(&Initdata {
+                version: "0.1.0".to_string(),
+                algorithm: "sha256".to_string(),
+                data,
+            })
+            .map_err(|e| anyhow!("Failed to serialize initdata: {e}"))
+        })
+        .transpose()?;
 
     let mut input = Vec::new();
     io::stdin().read_to_end(&mut input)?;
 
-    let jwk = fetch_and_prepare_jwk(&config.servers, &config.path)?;
+    let jwk = fetch_and_prepare_jwk(&config.servers, &config.path, initdata.clone())?;
 
     eprintln!("{}", jwk);
     let encrypter = Dir
@@ -57,6 +75,7 @@ fn encrypt(config: &str) -> Result<()> {
         pin: "trustee".to_string(),
         servers: config.servers.clone(),
         path: config.path,
+        initdata,
     };
 
     let mut hdr = josekit::jwe::JweHeader::new();
@@ -91,7 +110,8 @@ fn decrypt() -> Result<()> {
 
     eprintln!("Decrypt with header: {:?}", hdr_clevis);
 
-    let decrypter_jwk = fetch_and_prepare_jwk(&hdr_clevis.servers, &hdr_clevis.path)?;
+    let decrypter_jwk =
+        fetch_and_prepare_jwk(&hdr_clevis.servers, &hdr_clevis.path, hdr_clevis.initdata)?;
 
     let decrypter = Dir
         .decrypter_from_jwk(&decrypter_jwk)
@@ -106,7 +126,7 @@ fn decrypt() -> Result<()> {
     Ok(())
 }
 
-fn fetch_luks_key(servers: &[Server], path: &str) -> Result<String> {
+fn fetch_luks_key(servers: &[Server], path: &str, initdata: Option<String>) -> Result<String> {
     const MAX_ATTEMPTS: u32 = 3;
     const DELAY: Duration = Duration::from_secs(5);
 
@@ -123,7 +143,7 @@ fn fetch_luks_key(servers: &[Server], path: &str) -> Result<String> {
 
             for (index, server) in servers.iter().enumerate() {
                 eprintln!("Trying URL {}/{}: {}", index + 1, servers.len(), server.url);
-                match try_fetch_luks_key(&server.url, path) {
+                match try_fetch_luks_key(&server.url, path, initdata.clone()) {
                     Ok(key) => {
                         eprintln!("Successfully fetched LUKS key from URL: {}", server.url);
                         return Some(Ok(key));
@@ -151,13 +171,18 @@ fn fetch_luks_key(servers: &[Server], path: &str) -> Result<String> {
         })
 }
 
-fn try_fetch_luks_key(url: &str, path: &str) -> Result<String> {
-    let output = StdCommand::new("trustee-attester")
+fn try_fetch_luks_key(url: &str, path: &str, initdata: Option<String>) -> Result<String> {
+    let mut command = StdCommand::new("trustee-attester");
+    command
         .arg("--url")
         .arg(url)
         .arg("get-resource")
         .arg("--path")
-        .arg(path)
+        .arg(path);
+    if let Some(initdata_str) = initdata {
+        command.arg("--initdata").arg(initdata_str);
+    }
+    let output = command
         .output()
         .map_err(|e| anyhow!("Failed to execute trustee-attester: {}", e))?;
 
