@@ -287,3 +287,45 @@ fn main() -> Result<()> {
         Commands::Decrypt => decrypt(),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_fetch_luks_key_success() {
+        let mock = MockCommandExecutor {
+            response: Ok("test_luks_key_12345".to_string()),
+        };
+
+        let servers = vec![Server {
+            url: "http://server1.example.com".to_string(),
+            cert: String::new(),
+        }];
+
+        let result = fetch_luks_key(&servers, "/test/path", None, &mock);
+
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), "test_luks_key_12345");
+    }
+
+    #[test]
+    fn test_fetch_luks_key_error() {
+        let mock = MockCommandExecutor {
+            response: Err(anyhow!("Failed to connect to server")),
+        };
+
+        let servers = vec![Server {
+            url: "http://server1.example.com".to_string(),
+            cert: String::new(),
+        }];
+
+        let result = fetch_luks_key(&servers, "/test/path", None, &mock);
+
+        assert!(result.is_err());
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "Failed to fetch the LUKS key from all URLs after 3 attempts"
+        );
+    }
+}
