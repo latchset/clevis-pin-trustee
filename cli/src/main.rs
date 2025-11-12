@@ -15,6 +15,77 @@ use std::process::Command as StdCommand;
 use std::thread;
 use std::time::Duration;
 
+/// Trait for executing commands to fetch LUKS keys
+trait CommandExecutor {
+    fn try_fetch_luks_key(&self, url: &str, path: &str, initdata: Option<String>)
+    -> Result<String>;
+}
+
+/// Real implementation that calls the trustee-attester binary
+struct RealCommandExecutor;
+
+impl CommandExecutor for RealCommandExecutor {
+    fn try_fetch_luks_key(
+        &self,
+        url: &str,
+        path: &str,
+        initdata: Option<String>,
+    ) -> Result<String> {
+        let mut command = StdCommand::new("trustee-attester");
+        command
+            .arg("--url")
+            .arg(url)
+            .arg("get-resource")
+            .arg("--path")
+            .arg(path);
+        if let Some(initdata_str) = initdata {
+            command.arg("--initdata").arg(initdata_str);
+        }
+        let output = command
+            .output()
+            .map_err(|e| anyhow!("Failed to execute trustee-attester: {}", e))?;
+
+        io::stderr().write_all(&output.stderr)?;
+        io::stderr().write_all(&output.stdout)?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(anyhow!("trustee-attester failed: {}", stderr));
+        }
+
+        let key = String::from_utf8(output.stdout)
+            .map_err(|e| anyhow!("Invalid UTF-8 for the LUKS key: {}", e))?
+            .trim()
+            .to_string();
+
+        if key.is_empty() {
+            return Err(anyhow!("Received empty LUKS key"));
+        }
+
+        Ok(key)
+    }
+}
+
+#[cfg(test)]
+pub struct MockCommandExecutor {
+    pub response: Result<String>,
+}
+
+#[cfg(test)]
+impl CommandExecutor for MockCommandExecutor {
+    fn try_fetch_luks_key(
+        &self,
+        _url: &str,
+        _path: &str,
+        _initdata: Option<String>,
+    ) -> Result<String> {
+        match &self.response {
+            Ok(key) => Ok(key.clone()),
+            Err(e) => Err(anyhow!("{}", e)),
+        }
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 struct ClevisHeader {
     pin: String,
@@ -23,8 +94,13 @@ struct ClevisHeader {
     initdata: Option<String>,
 }
 
-fn fetch_and_prepare_jwk(servers: &[Server], path: &str, initdata: Option<String>) -> Result<Jwk> {
-    let key = fetch_luks_key(servers, path, initdata)?;
+fn fetch_and_prepare_jwk<E: CommandExecutor>(
+    servers: &[Server],
+    path: &str,
+    initdata: Option<String>,
+    executor: &E,
+) -> Result<Jwk> {
+    let key = fetch_luks_key(servers, path, initdata, executor)?;
     let key = String::from_utf8(
         general_purpose::STANDARD
             .decode(&key)
@@ -64,7 +140,8 @@ fn encrypt(config: &str) -> Result<()> {
     let mut input = Vec::new();
     io::stdin().read_to_end(&mut input)?;
 
-    let jwk = fetch_and_prepare_jwk(&config.servers, &config.path, initdata.clone())?;
+    let executor = RealCommandExecutor;
+    let jwk = fetch_and_prepare_jwk(&config.servers, &config.path, initdata.clone(), &executor)?;
 
     eprintln!("{}", jwk);
     let encrypter = Dir
@@ -110,8 +187,13 @@ fn decrypt() -> Result<()> {
 
     eprintln!("Decrypt with header: {:?}", hdr_clevis);
 
-    let decrypter_jwk =
-        fetch_and_prepare_jwk(&hdr_clevis.servers, &hdr_clevis.path, hdr_clevis.initdata)?;
+    let executor = RealCommandExecutor;
+    let decrypter_jwk = fetch_and_prepare_jwk(
+        &hdr_clevis.servers,
+        &hdr_clevis.path,
+        hdr_clevis.initdata,
+        &executor,
+    )?;
 
     let decrypter = Dir
         .decrypter_from_jwk(&decrypter_jwk)
@@ -126,7 +208,12 @@ fn decrypt() -> Result<()> {
     Ok(())
 }
 
-fn fetch_luks_key(servers: &[Server], path: &str, initdata: Option<String>) -> Result<String> {
+fn fetch_luks_key<E: CommandExecutor>(
+    servers: &[Server],
+    path: &str,
+    initdata: Option<String>,
+    executor: &E,
+) -> Result<String> {
     const MAX_ATTEMPTS: u32 = 3;
     const DELAY: Duration = Duration::from_secs(5);
 
@@ -143,7 +230,7 @@ fn fetch_luks_key(servers: &[Server], path: &str, initdata: Option<String>) -> R
 
             for (index, server) in servers.iter().enumerate() {
                 eprintln!("Trying URL {}/{}: {}", index + 1, servers.len(), server.url);
-                match try_fetch_luks_key(&server.url, path, initdata.clone()) {
+                match executor.try_fetch_luks_key(&server.url, path, initdata.clone()) {
                     Ok(key) => {
                         eprintln!("Successfully fetched LUKS key from URL: {}", server.url);
                         return Some(Ok(key));
@@ -169,41 +256,6 @@ fn fetch_luks_key(servers: &[Server], path: &str, initdata: Option<String>) -> R
                 MAX_ATTEMPTS
             ))
         })
-}
-
-fn try_fetch_luks_key(url: &str, path: &str, initdata: Option<String>) -> Result<String> {
-    let mut command = StdCommand::new("trustee-attester");
-    command
-        .arg("--url")
-        .arg(url)
-        .arg("get-resource")
-        .arg("--path")
-        .arg(path);
-    if let Some(initdata_str) = initdata {
-        command.arg("--initdata").arg(initdata_str);
-    }
-    let output = command
-        .output()
-        .map_err(|e| anyhow!("Failed to execute trustee-attester: {}", e))?;
-
-    io::stderr().write_all(&output.stderr)?;
-    io::stderr().write_all(&output.stdout)?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(anyhow!("trustee-attester failed: {}", stderr));
-    }
-
-    let key = String::from_utf8(output.stdout)
-        .map_err(|e| anyhow!("Invalid UTF-8 for the LUKS key: {}", e))?
-        .trim()
-        .to_string();
-
-    if key.is_empty() {
-        return Err(anyhow!("Received empty LUKS key"));
-    }
-
-    Ok(key)
 }
 
 /// Clevis PIN for confidential cluster
@@ -233,5 +285,47 @@ fn main() -> Result<()> {
     match cli.command {
         Commands::Encrypt { config } => encrypt(&config),
         Commands::Decrypt => decrypt(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_fetch_luks_key_success() {
+        let mock = MockCommandExecutor {
+            response: Ok("test_luks_key_12345".to_string()),
+        };
+
+        let servers = vec![Server {
+            url: "http://server1.example.com".to_string(),
+            cert: String::new(),
+        }];
+
+        let result = fetch_luks_key(&servers, "/test/path", None, &mock);
+
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), "test_luks_key_12345");
+    }
+
+    #[test]
+    fn test_fetch_luks_key_error() {
+        let mock = MockCommandExecutor {
+            response: Err(anyhow!("Failed to connect to server")),
+        };
+
+        let servers = vec![Server {
+            url: "http://server1.example.com".to_string(),
+            cert: String::new(),
+        }];
+
+        let result = fetch_luks_key(&servers, "/test/path", None, &mock);
+
+        assert!(result.is_err());
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "Failed to fetch the LUKS key from all URLs after 3 attempts"
+        );
     }
 }
