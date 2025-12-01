@@ -14,7 +14,7 @@ license.workspace = true
 [dependencies]
 anyhow = "1.0"
 base64 = "0.22.1"
-clap = { version = "4.0", features = ["derive"] }
+clap = { version = "4.5", features = ["derive"] }
 clevis-pin-trustee-lib = { path = "../lib" }
 hex = "0.4.3"
 josekit = "0.10.3"
