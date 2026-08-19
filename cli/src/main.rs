@@ -263,11 +263,12 @@ fn fetch_and_prepare_jwk<E: CommandExecutor>(
     let key = String::from_utf8(
         general_purpose::STANDARD
             .decode(&key)
-            .context("Error decoding key in base64")?,
+            .map_err(|_| anyhow!("Error decoding key in base64"))?,
     )
     .context("Error decoding the key in JSON")?;
-    eprintln!("Key: {:?}", key);
-    let key: Key = serde_json::from_str(&key).context("Error in parsing the fetched key")?;
+    // Hide key contents, do not print context
+    let key: Key =
+        serde_json::from_str(&key).map_err(|_| anyhow!("Error in parsing the fetched key"))?;
 
     let mut jwk = Jwk::new(&key.key_type);
     jwk.set_key_value(&key.key);
