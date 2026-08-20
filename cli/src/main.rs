@@ -104,7 +104,6 @@ impl CommandExecutor for RealCommandExecutor {
             .output()
             .map_err(|e| anyhow!("Failed to execute trustee-attester: {}", e))?;
 
-        io::stderr().write_all(&output.stderr)?;
         io::stderr().write_all(&output.stdout)?;
 
         if !output.status.success() {
@@ -557,20 +556,21 @@ fn try_fetch_from_servers<E: CommandExecutor>(
     path: &str,
     initdata: &Option<String>,
     executor: &E,
-) -> Option<String> {
+) -> Result<String> {
+    let mut err = String::new();
     for (index, server) in servers.iter().enumerate() {
         eprintln!("Trying URL {}/{}: {}", index + 1, servers.len(), server.url);
         match executor.try_fetch_luks_key(&server.url, path, &server.cert, initdata.clone()) {
             Ok(key) => {
                 eprintln!("Successfully fetched LUKS key from URL: {}", server.url);
-                return Some(key);
+                return Ok(key);
             }
             Err(e) => {
-                eprintln!("Error with URL {}: {}", server.url, e);
+                err.push_str(&format!("\nError with URL {}: {e}", server.url));
             }
         }
     }
-    None
+    Err(anyhow!("{err}"))
 }
 
 fn fetch_luks_key<E: CommandExecutor>(
@@ -584,6 +584,7 @@ fn fetch_luks_key<E: CommandExecutor>(
         return Err(anyhow!("No URLs provided"));
     }
 
+    let mut last_err = anyhow!("");
     match num_retries {
         NumRetries::Finite(max_attempts) => (1..=*max_attempts)
             .find_map(|attempt| {
@@ -592,8 +593,9 @@ fn fetch_luks_key<E: CommandExecutor>(
                     attempt, max_attempts
                 );
 
-                if let Some(key) = try_fetch_from_servers(servers, path, &initdata, executor) {
-                    return Some(Ok(key));
+                match try_fetch_from_servers(servers, path, &initdata, executor) {
+                    Ok(key) => return Some(Ok(key)),
+                    Err(e) => last_err = e,
                 }
 
                 if attempt < *max_attempts {
@@ -607,8 +609,7 @@ fn fetch_luks_key<E: CommandExecutor>(
             })
             .unwrap_or_else(|| {
                 Err(anyhow!(
-                    "Failed to fetch the LUKS key from all URLs after {} attempts",
-                    max_attempts
+                    "Failed to fetch the LUKS key from all URLs after {max_attempts} attempts, last errors were:{last_err}",
                 ))
             }),
         NumRetries::Infinity => {
@@ -617,13 +618,14 @@ fn fetch_luks_key<E: CommandExecutor>(
                 attempt += 1;
                 eprintln!("Attempting to fetch LUKS key (attempt {})", attempt);
 
-                if let Some(key) = try_fetch_from_servers(servers, path, &initdata, executor) {
-                    return Ok(key);
+                let result = try_fetch_from_servers(servers, path, &initdata, executor);
+                if result.is_ok() {
+                    return result;
                 }
-
                 eprintln!(
-                    "All URLs failed for attempt {}. Retrying in {:?} seconds...",
-                    attempt, DELAY
+                    "All URLs failed for attempt {attempt} with errors {}. Retrying in {:?} seconds...",
+                    result.unwrap_err(),
+                    DELAY
                 );
                 thread::sleep(DELAY);
             }
@@ -700,7 +702,7 @@ mod tests {
         assert!(result.is_err());
         assert_eq!(
             result.unwrap_err().to_string(),
-            "Failed to fetch the LUKS key from all URLs after 3 attempts"
+            "Failed to fetch the LUKS key from all URLs after 3 attempts, last errors were:\nError with URL http://server1.example.com: Failed to connect to server"
         );
     }
 
