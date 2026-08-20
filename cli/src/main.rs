@@ -104,8 +104,6 @@ impl CommandExecutor for RealCommandExecutor {
             .output()
             .map_err(|e| anyhow!("Failed to execute trustee-attester: {}", e))?;
 
-        io::stderr().write_all(&output.stdout)?;
-
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             return Err(anyhow!("trustee-attester failed: {}", stderr));
