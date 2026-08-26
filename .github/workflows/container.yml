@@ -31,7 +31,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
 
       - name: Build Trustee image
         id: build-image
@@ -44,7 +44,7 @@ jobs:
           oci: true
 
       - name: Push to Container Registry
-        uses: redhat-actions/push-to-registry@v2
+        uses: redhat-actions/push-to-registry@v3
         if: (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main' && github.repository_owner == 'latchset'
         with:
           image: ${{ steps.build-image.outputs.image }}
