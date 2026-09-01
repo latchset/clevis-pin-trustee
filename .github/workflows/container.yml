@@ -35,7 +35,7 @@ jobs:
 
       - name: Build Trustee image
         id: build-image
-        uses: redhat-actions/buildah-build@v2
+        uses: redhat-actions/buildah-build@v3
         with:
           image: ${{ env.NAME }}
           tags: latest
