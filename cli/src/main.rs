@@ -105,14 +105,17 @@ impl CommandExecutor for RealCommandExecutor {
             .map_err(|e| anyhow!("Failed to execute trustee-attester: {}", e))?;
 
         if !output.status.success() {
+            let stdout = String::from_utf8_lossy(&output.stdout);
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(anyhow!("trustee-attester failed: {}", stderr));
+            return Err(anyhow!(
+                "trustee-attester failed: stdout: {stdout}, stderr: {stderr}"
+            ));
         }
 
-        let key = String::from_utf8(output.stdout)
-            .map_err(|e| anyhow!("Invalid UTF-8 for the LUKS key: {}", e))?
-            .trim()
-            .to_string();
+        let stdout = String::from_utf8(output.stdout)
+            .map_err(|e| anyhow!("Invalid UTF-8 for the LUKS key: {}", e))?;
+
+        let key = stdout.lines().last().unwrap_or("").trim().to_string();
 
         if key.is_empty() {
             return Err(anyhow!("Received empty LUKS key"));
