@@ -4,7 +4,7 @@
 
 [package]
 name = "clevis-pin-trustee"
-version = "0.1.0"
+version = "0.1.1"
 description = "Clevis PIN for URL-based encryption/decryption"
 edition.workspace = true
 repository.workspace = true
