@@ -457,7 +457,7 @@ fn encrypt(config: &str) -> Result<()> {
     let initdata = initdata_data
         .map(|data| {
             toml::to_string(&Initdata {
-                version: "0.1.1".to_string(),
+                version: "0.1.2".to_string(),
                 algorithm: "sha256".to_string(),
                 data,
             })
@@ -637,7 +637,7 @@ fn fetch_luks_key<E: CommandExecutor>(
 /// Clevis PIN for Trustee
 #[derive(Parser)]
 #[command(name = "clevis-pin-trustee")]
-#[command(version = "0.1.1")]
+#[command(version = "0.1.2")]
 #[command(about = "Clevis PIN for Trustee")]
 struct Cli {
     #[command(subcommand)]
