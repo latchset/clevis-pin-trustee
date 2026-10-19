@@ -8,6 +8,7 @@ use clap::{Parser, Subcommand};
 use clevis_pin_trustee_lib::*;
 use josekit::jwe::alg::direct::DirectJweAlgorithm::Dir;
 use josekit::jwk::Jwk;
+use rand::RngExt;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::{self, Read, Write};
@@ -446,6 +447,13 @@ fn encrypt(config: &str) -> Result<()> {
     let config: Config =
         serde_json::from_str(config).map_err(|e| anyhow!("Failed to parse config JSON: {}", e))?;
 
+    let mut input = Vec::new();
+    io::stdin().read_to_end(&mut input)?;
+
+    if config.offline {
+        return encrypt_offline(&config, &input);
+    }
+
     attestation_key_handle(&config.attestation_key)?;
 
     let initdata_str = config.initdata.as_ref();
@@ -464,9 +472,6 @@ fn encrypt(config: &str) -> Result<()> {
             .map_err(|e| anyhow!("Failed to serialize initdata: {e}"))
         })
         .transpose()?;
-
-    let mut input = Vec::new();
-    io::stdin().read_to_end(&mut input)?;
 
     let executor = RealCommandExecutor;
     let num_retries = config
@@ -510,6 +515,89 @@ fn encrypt(config: &str) -> Result<()> {
         .write_all(jwe_token.as_bytes())
         .context("Error writing the token on stdout")?;
     eprintln!("Encryption successful.");
+
+    Ok(())
+}
+
+fn generate_local_jwk() -> Result<(Jwk, Key)> {
+    let mut raw_key = [0u8; 32];
+    rand::rng().fill(&mut raw_key);
+    let key_b64 = general_purpose::STANDARD.encode(raw_key);
+
+    let key = Key {
+        key_type: "oct".to_string(),
+        key: key_b64,
+    };
+
+    let mut jwk = Jwk::new("oct");
+    jwk.set_key_value(raw_key);
+    jwk.set_key_operations(vec!["encrypt", "decrypt"]);
+
+    Ok((jwk, key))
+}
+
+fn build_initdata(config: &Config) -> Result<Option<String>> {
+    config
+        .initdata
+        .as_ref()
+        .map(|s| {
+            let data: HashMap<String, String> = serde_json::from_str(s)
+                .map_err(|e| anyhow!("Failed to parse config initdata: {e}"))?;
+            toml::to_string(&Initdata {
+                version: "0.1.2".to_string(),
+                algorithm: "sha256".to_string(),
+                data,
+            })
+            .map_err(|e| anyhow!("Failed to serialize initdata: {e}"))
+        })
+        .transpose()
+}
+
+fn encrypt_offline_core(config: &Config, input: &[u8]) -> Result<(String, String)> {
+    let (jwk, key) = generate_local_jwk()?;
+
+    let encrypter = Dir
+        .encrypter_from_jwk(&jwk)
+        .context("Error creating direct encrypter")?;
+
+    let initdata = build_initdata(config)?;
+
+    let private_hdr = ClevisHeader {
+        pin: "trustee".to_string(),
+        servers: config.servers.clone(),
+        path: config.path.clone(),
+        initdata,
+        num_retries: config.num_retries.clone(),
+    };
+
+    let mut hdr = josekit::jwe::JweHeader::new();
+    hdr.set_algorithm("ECDH-ES");
+    hdr.set_content_encryption("A256GCM");
+    hdr.set_claim(
+        "clevis",
+        Some(serde_json::value::to_value(private_hdr).context("Error serializing private header")?),
+    )
+    .context("Error adding clevis claim")?;
+
+    let jwe_token = josekit::jwe::serialize_compact(input, &hdr, &encrypter)
+        .context("Error serializing JWE token")?;
+
+    let key_json = serde_json::to_string(&key).context("Error serializing generated key")?;
+    let key_b64 = general_purpose::STANDARD.encode(key_json.as_bytes());
+
+    Ok((jwe_token, key_b64))
+}
+
+fn encrypt_offline(config: &Config, input: &[u8]) -> Result<()> {
+    let (jwe_token, key_b64) = encrypt_offline_core(config, input)?;
+
+    io::stdout()
+        .write_all(jwe_token.as_bytes())
+        .context("Error writing the token on stdout")?;
+
+    eprintln!("Offline encryption successful.");
+    eprintln!("Upload this key to the KBS at the configured resource path:");
+    eprintln!("{}", key_b64);
 
     Ok(())
 }
@@ -1049,5 +1137,99 @@ mod tests {
         use clap::CommandFactory;
         let cmd = Cli::command();
         assert_eq!(cmd.get_version().unwrap(), env!("CARGO_PKG_VERSION"));
+    }
+
+    #[test]
+    fn test_generate_local_jwk_produces_valid_key() {
+        let (jwk, key) = generate_local_jwk().unwrap();
+
+        assert_eq!(key.key_type, "oct");
+        assert!(!key.key.is_empty());
+
+        let raw = general_purpose::STANDARD.decode(&key.key).unwrap();
+        assert_eq!(raw.len(), 32);
+
+        assert_eq!(jwk.key_type(), "oct");
+    }
+
+    #[test]
+    fn test_generate_local_jwk_produces_unique_keys() {
+        let (_, key1) = generate_local_jwk().unwrap();
+        let (_, key2) = generate_local_jwk().unwrap();
+
+        assert_ne!(key1.key, key2.key);
+    }
+
+    fn make_offline_config() -> Config {
+        Config {
+            servers: vec![Server {
+                url: "http://kbs.example.com".to_string(),
+                cert: String::new(),
+            }],
+            path: "test/key/path".to_string(),
+            initdata: None,
+            num_retries: None,
+            attestation_key: None,
+            offline: true,
+        }
+    }
+
+    #[test]
+    fn test_encrypt_offline_produces_valid_jwe() {
+        let config = make_offline_config();
+        let plaintext = b"my-secret-luks-passphrase";
+
+        let (jwe_token, key_b64) = encrypt_offline_core(&config, plaintext).unwrap();
+
+        let hdr = josekit::jwt::decode_header(&jwe_token).unwrap();
+        let clevis = hdr.claim("clevis").unwrap();
+        let clevis: ClevisHeader = serde_json::from_value(clevis.clone()).unwrap();
+        assert_eq!(clevis.pin, "trustee");
+        assert_eq!(clevis.servers.len(), 1);
+        assert_eq!(clevis.servers[0].url, "http://kbs.example.com");
+        assert_eq!(clevis.path, "test/key/path");
+
+        let key_json_bytes = general_purpose::STANDARD.decode(&key_b64).unwrap();
+        let key: Key = serde_json::from_slice(&key_json_bytes).unwrap();
+        assert_eq!(key.key_type, "oct");
+
+        let raw_key = general_purpose::STANDARD
+            .decode(&key.key)
+            .expect("key.key should be valid base64");
+        assert_eq!(raw_key.len(), 32);
+
+        let mut jwk = Jwk::new("oct");
+        jwk.set_key_value(raw_key);
+        jwk.set_key_operations(vec!["encrypt", "decrypt"]);
+        let decrypter = Dir.decrypter_from_jwk(&jwk).unwrap();
+        let (payload, _) = josekit::jwe::deserialize_compact(&jwe_token, &decrypter).unwrap();
+        assert_eq!(payload, plaintext);
+    }
+
+    #[test]
+    fn test_encrypt_offline_config_from_json() {
+        let json = r#"{"servers":[{"url":"http://kbs.example.com","cert":""}],"path":"test/key/path","offline":true}"#;
+        let config: Config = serde_json::from_str(json).unwrap();
+        assert!(config.offline);
+
+        let (jwe_token, _) = encrypt_offline_core(&config, b"passphrase").unwrap();
+        let hdr = josekit::jwt::decode_header(&jwe_token).unwrap();
+        let clevis = hdr.claim("clevis").unwrap();
+        let clevis: ClevisHeader = serde_json::from_value(clevis.clone()).unwrap();
+        assert_eq!(clevis.pin, "trustee");
+    }
+
+    #[test]
+    fn test_offline_defaults_to_false() {
+        let json =
+            r#"{"servers":[{"url":"http://kbs.example.com","cert":""}],"path":"test/key/path"}"#;
+        let config: Config = serde_json::from_str(json).unwrap();
+        assert!(!config.offline);
+    }
+
+    #[test]
+    fn test_encrypt_offline_invalid_config() {
+        let result: std::result::Result<Config, _> = serde_json::from_str("not-valid-json");
+        assert!(result.is_err());
     }
 }
