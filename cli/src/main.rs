@@ -520,17 +520,19 @@ fn encrypt(config: &str) -> Result<()> {
 }
 
 fn generate_local_jwk() -> Result<(Jwk, Key)> {
-    let mut raw_key = [0u8; 32];
+    let mut raw_key = [0u8; 16];
     rand::rng().fill(&mut raw_key);
-    let key_b64 = general_purpose::STANDARD.encode(raw_key);
+    // Hex-encode to 32 chars matching KBS convention (openssl rand -hex 16).
+    // set_key_value treats the string bytes as raw key material (32 bytes = AES-256).
+    let key_hex = hex::encode(raw_key);
 
     let key = Key {
         key_type: "oct".to_string(),
-        key: key_b64,
+        key: key_hex.clone(),
     };
 
     let mut jwk = Jwk::new("oct");
-    jwk.set_key_value(raw_key);
+    jwk.set_key_value(key_hex);
     jwk.set_key_operations(vec!["encrypt", "decrypt"]);
 
     Ok((jwk, key))
@@ -583,9 +585,8 @@ fn encrypt_offline_core(config: &Config, input: &[u8]) -> Result<(String, String
         .context("Error serializing JWE token")?;
 
     let key_json = serde_json::to_string(&key).context("Error serializing generated key")?;
-    let key_b64 = general_purpose::STANDARD.encode(key_json.as_bytes());
 
-    Ok((jwe_token, key_b64))
+    Ok((jwe_token, key_json))
 }
 
 fn encrypt_offline(config: &Config, input: &[u8]) -> Result<()> {
@@ -595,13 +596,13 @@ fn encrypt_offline(config: &Config, input: &[u8]) -> Result<()> {
         .filter(|p| !p.is_empty())
         .ok_or_else(|| anyhow!("offline_key_path is required when offline is true"))?;
 
-    let (jwe_token, key_b64) = encrypt_offline_core(config, input)?;
+    let (jwe_token, key_json) = encrypt_offline_core(config, input)?;
 
     io::stdout()
         .write_all(jwe_token.as_bytes())
         .context("Error writing the token on stdout")?;
 
-    fs::write(key_path, &key_b64)
+    fs::write(key_path, &key_json)
         .with_context(|| format!("Failed to write key to {}", key_path))?;
 
     eprintln!("Offline encryption successful.");
@@ -1154,8 +1155,8 @@ mod tests {
         assert_eq!(key.key_type, "oct");
         assert!(!key.key.is_empty());
 
-        let raw = general_purpose::STANDARD.decode(&key.key).unwrap();
-        assert_eq!(raw.len(), 32);
+        assert_eq!(key.key.len(), 32);
+        assert!(key.key.chars().all(|c| c.is_ascii_hexdigit()));
 
         assert_eq!(jwk.key_type(), "oct");
     }
@@ -1188,7 +1189,7 @@ mod tests {
         let config = make_offline_config();
         let plaintext = b"my-secret-luks-passphrase";
 
-        let (jwe_token, key_b64) = encrypt_offline_core(&config, plaintext).unwrap();
+        let (jwe_token, key_json) = encrypt_offline_core(&config, plaintext).unwrap();
 
         let hdr = josekit::jwt::decode_header(&jwe_token).unwrap();
         let clevis = hdr.claim("clevis").unwrap();
@@ -1198,17 +1199,12 @@ mod tests {
         assert_eq!(clevis.servers[0].url, "http://kbs.example.com");
         assert_eq!(clevis.path, "test/key/path");
 
-        let key_json_bytes = general_purpose::STANDARD.decode(&key_b64).unwrap();
-        let key: Key = serde_json::from_slice(&key_json_bytes).unwrap();
+        let key: Key = serde_json::from_str(&key_json).unwrap();
         assert_eq!(key.key_type, "oct");
 
-        let raw_key = general_purpose::STANDARD
-            .decode(&key.key)
-            .expect("key.key should be valid base64");
-        assert_eq!(raw_key.len(), 32);
-
+        // Simulate the decrypt path: set_key_value(&key.key) matches fetch_and_prepare_jwk
         let mut jwk = Jwk::new("oct");
-        jwk.set_key_value(raw_key);
+        jwk.set_key_value(&key.key);
         jwk.set_key_operations(vec!["encrypt", "decrypt"]);
         let decrypter = Dir.decrypter_from_jwk(&jwk).unwrap();
         let (payload, _) = josekit::jwe::deserialize_compact(&jwe_token, &decrypter).unwrap();
@@ -1265,8 +1261,7 @@ mod tests {
         assert!(result.is_ok());
 
         let written = fs::read_to_string(&key_path).unwrap();
-        let key_json_bytes = general_purpose::STANDARD.decode(&written).unwrap();
-        let key: Key = serde_json::from_slice(&key_json_bytes).unwrap();
+        let key: Key = serde_json::from_str(&written).unwrap();
         assert_eq!(key.key_type, "oct");
     }
 
