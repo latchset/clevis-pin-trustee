@@ -589,15 +589,23 @@ fn encrypt_offline_core(config: &Config, input: &[u8]) -> Result<(String, String
 }
 
 fn encrypt_offline(config: &Config, input: &[u8]) -> Result<()> {
+    let key_path = config
+        .offline_key_path
+        .as_deref()
+        .filter(|p| !p.is_empty())
+        .ok_or_else(|| anyhow!("offline_key_path is required when offline is true"))?;
+
     let (jwe_token, key_b64) = encrypt_offline_core(config, input)?;
 
     io::stdout()
         .write_all(jwe_token.as_bytes())
         .context("Error writing the token on stdout")?;
 
+    fs::write(key_path, &key_b64)
+        .with_context(|| format!("Failed to write key to {}", key_path))?;
+
     eprintln!("Offline encryption successful.");
-    eprintln!("Upload this key to the KBS at the configured resource path:");
-    eprintln!("{}", key_b64);
+    eprintln!("Key written to: {}", key_path);
 
     Ok(())
 }
@@ -1171,6 +1179,7 @@ mod tests {
             num_retries: None,
             attestation_key: None,
             offline: true,
+            offline_key_path: Some("/tmp/test_key.json".to_string()),
         }
     }
 
@@ -1208,9 +1217,10 @@ mod tests {
 
     #[test]
     fn test_encrypt_offline_config_from_json() {
-        let json = r#"{"servers":[{"url":"http://kbs.example.com","cert":""}],"path":"test/key/path","offline":true}"#;
+        let json = r#"{"servers":[{"url":"http://kbs.example.com","cert":""}],"path":"test/key/path","offline":true,"offline_key_path":"/tmp/key.json"}"#;
         let config: Config = serde_json::from_str(json).unwrap();
         assert!(config.offline);
+        assert_eq!(config.offline_key_path.as_deref(), Some("/tmp/key.json"));
 
         let (jwe_token, _) = encrypt_offline_core(&config, b"passphrase").unwrap();
         let hdr = josekit::jwt::decode_header(&jwe_token).unwrap();
@@ -1225,11 +1235,63 @@ mod tests {
             r#"{"servers":[{"url":"http://kbs.example.com","cert":""}],"path":"test/key/path"}"#;
         let config: Config = serde_json::from_str(json).unwrap();
         assert!(!config.offline);
+        assert!(config.offline_key_path.is_none());
     }
 
     #[test]
     fn test_encrypt_offline_invalid_config() {
         let result: std::result::Result<Config, _> = serde_json::from_str("not-valid-json");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_encrypt_offline_writes_key_to_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let key_path = dir.path().join("offline_key.json");
+        let config = Config {
+            servers: vec![Server {
+                url: "http://kbs.example.com".to_string(),
+                cert: String::new(),
+            }],
+            path: "test/key/path".to_string(),
+            initdata: None,
+            num_retries: None,
+            attestation_key: None,
+            offline: true,
+            offline_key_path: Some(key_path.to_str().unwrap().to_string()),
+        };
+
+        let result = encrypt_offline(&config, b"my-passphrase");
+        assert!(result.is_ok());
+
+        let written = fs::read_to_string(&key_path).unwrap();
+        let key_json_bytes = general_purpose::STANDARD.decode(&written).unwrap();
+        let key: Key = serde_json::from_slice(&key_json_bytes).unwrap();
+        assert_eq!(key.key_type, "oct");
+    }
+
+    #[test]
+    fn test_encrypt_offline_missing_key_path() {
+        let config = Config {
+            servers: vec![Server {
+                url: "http://kbs.example.com".to_string(),
+                cert: String::new(),
+            }],
+            path: "test/key/path".to_string(),
+            initdata: None,
+            num_retries: None,
+            attestation_key: None,
+            offline: true,
+            offline_key_path: None,
+        };
+
+        let result = encrypt_offline(&config, b"my-passphrase");
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("offline_key_path is required")
+        );
     }
 }
