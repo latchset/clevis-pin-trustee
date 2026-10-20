@@ -605,9 +605,6 @@ fn encrypt_offline(config: &Config, input: &[u8]) -> Result<()> {
     fs::write(key_path, &key_json)
         .with_context(|| format!("Failed to write key to {}", key_path))?;
 
-    eprintln!("Offline encryption successful.");
-    eprintln!("Key written to: {}", key_path);
-
     Ok(())
 }
 
