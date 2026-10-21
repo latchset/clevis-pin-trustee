@@ -457,7 +457,7 @@ fn encrypt(config: &str) -> Result<()> {
     let initdata = initdata_data
         .map(|data| {
             toml::to_string(&Initdata {
-                version: "0.1.2".to_string(),
+                version: env!("CARGO_PKG_VERSION").to_string(),
                 algorithm: "sha256".to_string(),
                 data,
             })
@@ -637,7 +637,7 @@ fn fetch_luks_key<E: CommandExecutor>(
 /// Clevis PIN for Trustee
 #[derive(Parser)]
 #[command(name = "clevis-pin-trustee")]
-#[command(version = "0.1.2")]
+#[command(version)]
 #[command(about = "Clevis PIN for Trustee")]
 struct Cli {
     #[command(subcommand)]
@@ -1042,5 +1042,12 @@ mod tests {
 
         assert!(result.is_err());
         assert_eq!(result.unwrap_err().to_string(), "Permission denied");
+    }
+
+    #[test]
+    fn test_cli_version_matches_cargo() {
+        use clap::CommandFactory;
+        let cmd = Cli::command();
+        assert_eq!(cmd.get_version().unwrap(), env!("CARGO_PKG_VERSION"));
     }
 }
