@@ -12,6 +12,7 @@ use rand::RngExt;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::{self, Read, Write};
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 use std::process::Command as StdCommand;
 use std::time::Duration;
@@ -589,21 +590,52 @@ fn encrypt_offline_core(config: &Config, input: &[u8]) -> Result<(String, String
     Ok((jwe_token, key_json))
 }
 
-fn encrypt_offline(config: &Config, input: &[u8]) -> Result<()> {
-    let key_path = config
+fn validate_offline_config(config: &Config) -> Result<&str> {
+    if config.servers.is_empty() {
+        return Err(anyhow!("servers list must not be empty"));
+    }
+    for (i, server) in config.servers.iter().enumerate() {
+        if server.url.is_empty() {
+            return Err(anyhow!("servers[{}].url must not be empty", i));
+        }
+    }
+    let segments: Vec<&str> = config.path.split('/').collect();
+    if segments.len() != 3 || segments.iter().any(|s| s.is_empty()) {
+        return Err(anyhow!(
+            "path must follow the KBS resource format 'repo/type/tag', got: '{}'",
+            config.path
+        ));
+    }
+    config
         .offline_key_path
         .as_deref()
         .filter(|p| !p.is_empty())
-        .ok_or_else(|| anyhow!("offline_key_path is required when offline is true"))?;
+        .ok_or_else(|| anyhow!("offline_key_path is required when offline is true"))
+}
+
+fn write_key_file(key_path: &str, key_json: &str) -> Result<()> {
+    let mut f = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(key_path)
+        .with_context(|| format!("Failed to create key file {}", key_path))?;
+    f.write_all(key_json.as_bytes())?;
+    f.sync_all()?;
+    Ok(())
+}
+
+fn encrypt_offline(config: &Config, input: &[u8]) -> Result<()> {
+    let key_path = validate_offline_config(config)?;
 
     let (jwe_token, key_json) = encrypt_offline_core(config, input)?;
+
+    write_key_file(key_path, &key_json)
+        .with_context(|| format!("Failed to write key to {}", key_path))?;
 
     io::stdout()
         .write_all(jwe_token.as_bytes())
         .context("Error writing the token on stdout")?;
-
-    fs::write(key_path, &key_json)
-        .with_context(|| format!("Failed to write key to {}", key_path))?;
 
     Ok(())
 }
@@ -1239,6 +1271,8 @@ mod tests {
 
     #[test]
     fn test_encrypt_offline_writes_key_to_file() {
+        use std::os::unix::fs::PermissionsExt;
+
         let dir = tempfile::tempdir().unwrap();
         let key_path = dir.path().join("offline_key.json");
         let config = Config {
@@ -1257,9 +1291,38 @@ mod tests {
         let result = encrypt_offline(&config, b"my-passphrase");
         assert!(result.is_ok());
 
+        let metadata = fs::metadata(&key_path).unwrap();
+        assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
+
         let written = fs::read_to_string(&key_path).unwrap();
         let key: Key = serde_json::from_str(&written).unwrap();
         assert_eq!(key.key_type, "oct");
+    }
+
+    #[test]
+    fn test_encrypt_offline_refuses_overwrite() {
+        let dir = tempfile::tempdir().unwrap();
+        let key_path = dir.path().join("existing_key.json");
+        fs::write(&key_path, "old-key").unwrap();
+
+        let config = Config {
+            servers: vec![Server {
+                url: "http://kbs.example.com".to_string(),
+                cert: String::new(),
+            }],
+            path: "test/key/path".to_string(),
+            initdata: None,
+            num_retries: None,
+            attestation_key: None,
+            offline: true,
+            offline_key_path: Some(key_path.to_str().unwrap().to_string()),
+        };
+
+        let result = encrypt_offline(&config, b"my-passphrase");
+        assert!(result.is_err());
+
+        let content = fs::read_to_string(&key_path).unwrap();
+        assert_eq!(content, "old-key");
     }
 
     #[test]
@@ -1285,5 +1348,72 @@ mod tests {
                 .to_string()
                 .contains("offline_key_path is required")
         );
+    }
+
+    #[test]
+    fn test_validate_offline_config_empty_servers() {
+        let config = Config {
+            servers: vec![],
+            path: "test/key/path".to_string(),
+            initdata: None,
+            num_retries: None,
+            attestation_key: None,
+            offline: true,
+            offline_key_path: Some("/tmp/key.json".to_string()),
+        };
+
+        let result = validate_offline_config(&config);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("servers list must not be empty")
+        );
+    }
+
+    #[test]
+    fn test_validate_offline_config_empty_url() {
+        let config = Config {
+            servers: vec![Server {
+                url: String::new(),
+                cert: String::new(),
+            }],
+            path: "test/key/path".to_string(),
+            initdata: None,
+            num_retries: None,
+            attestation_key: None,
+            offline: true,
+            offline_key_path: Some("/tmp/key.json".to_string()),
+        };
+
+        let result = validate_offline_config(&config);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("url must not be empty")
+        );
+    }
+
+    #[test]
+    fn test_validate_offline_config_invalid_path() {
+        let config = Config {
+            servers: vec![Server {
+                url: "http://kbs.example.com".to_string(),
+                cert: String::new(),
+            }],
+            path: "only-two/segments".to_string(),
+            initdata: None,
+            num_retries: None,
+            attestation_key: None,
+            offline: true,
+            offline_key_path: Some("/tmp/key.json".to_string()),
+        };
+
+        let result = validate_offline_config(&config);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("repo/type/tag"));
     }
 }
