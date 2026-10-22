@@ -466,7 +466,7 @@ fn encrypt(config: &str) -> Result<()> {
     let initdata = initdata_data
         .map(|data| {
             toml::to_string(&Initdata {
-                version: env!("CARGO_PKG_VERSION").to_string(),
+                version: "0.1.0".to_string(),
                 algorithm: "sha256".to_string(),
                 data,
             })
