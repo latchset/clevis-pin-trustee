@@ -8,9 +8,11 @@ use clap::{Parser, Subcommand};
 use clevis_pin_trustee_lib::*;
 use josekit::jwe::alg::direct::DirectJweAlgorithm::Dir;
 use josekit::jwk::Jwk;
+use rand::RngExt;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::{self, Read, Write};
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 use std::process::Command as StdCommand;
 use std::time::Duration;
@@ -446,6 +448,13 @@ fn encrypt(config: &str) -> Result<()> {
     let config: Config =
         serde_json::from_str(config).map_err(|e| anyhow!("Failed to parse config JSON: {}", e))?;
 
+    let mut input = Vec::new();
+    io::stdin().read_to_end(&mut input)?;
+
+    if config.offline {
+        return encrypt_offline(&config, &input);
+    }
+
     attestation_key_handle(&config.attestation_key)?;
 
     let initdata_str = config.initdata.as_ref();
@@ -464,9 +473,6 @@ fn encrypt(config: &str) -> Result<()> {
             .map_err(|e| anyhow!("Failed to serialize initdata: {e}"))
         })
         .transpose()?;
-
-    let mut input = Vec::new();
-    io::stdin().read_to_end(&mut input)?;
 
     let executor = RealCommandExecutor;
     let num_retries = config
@@ -510,6 +516,126 @@ fn encrypt(config: &str) -> Result<()> {
         .write_all(jwe_token.as_bytes())
         .context("Error writing the token on stdout")?;
     eprintln!("Encryption successful.");
+
+    Ok(())
+}
+
+fn generate_local_jwk() -> Result<(Jwk, Key)> {
+    let mut raw_key = [0u8; 16];
+    rand::rng().fill(&mut raw_key);
+    // Hex-encode to 32 chars matching KBS convention (openssl rand -hex 16).
+    // set_key_value treats the string bytes as raw key material (32 bytes = AES-256).
+    let key_hex = hex::encode(raw_key);
+
+    let key = Key {
+        key_type: "oct".to_string(),
+        key: key_hex.clone(),
+    };
+
+    let mut jwk = Jwk::new("oct");
+    jwk.set_key_value(key_hex);
+    jwk.set_key_operations(vec!["encrypt", "decrypt"]);
+
+    Ok((jwk, key))
+}
+
+fn build_initdata(config: &Config) -> Result<Option<String>> {
+    config
+        .initdata
+        .as_ref()
+        .map(|s| {
+            let data: HashMap<String, String> = serde_json::from_str(s)
+                .map_err(|e| anyhow!("Failed to parse config initdata: {e}"))?;
+            toml::to_string(&Initdata {
+                version: "0.1.0".to_string(),
+                algorithm: "sha256".to_string(),
+                data,
+            })
+            .map_err(|e| anyhow!("Failed to serialize initdata: {e}"))
+        })
+        .transpose()
+}
+
+fn encrypt_offline_core(config: &Config, input: &[u8]) -> Result<(String, String)> {
+    let (jwk, key) = generate_local_jwk()?;
+
+    let encrypter = Dir
+        .encrypter_from_jwk(&jwk)
+        .context("Error creating direct encrypter")?;
+
+    let initdata = build_initdata(config)?;
+
+    let private_hdr = ClevisHeader {
+        pin: "trustee".to_string(),
+        servers: config.servers.clone(),
+        path: config.path.clone(),
+        initdata,
+        num_retries: config.num_retries.clone(),
+    };
+
+    let mut hdr = josekit::jwe::JweHeader::new();
+    hdr.set_algorithm("ECDH-ES");
+    hdr.set_content_encryption("A256GCM");
+    hdr.set_claim(
+        "clevis",
+        Some(serde_json::value::to_value(private_hdr).context("Error serializing private header")?),
+    )
+    .context("Error adding clevis claim")?;
+
+    let jwe_token = josekit::jwe::serialize_compact(input, &hdr, &encrypter)
+        .context("Error serializing JWE token")?;
+
+    let key_json = serde_json::to_string(&key).context("Error serializing generated key")?;
+
+    Ok((jwe_token, key_json))
+}
+
+fn validate_offline_config(config: &Config) -> Result<&str> {
+    if config.servers.is_empty() {
+        return Err(anyhow!("servers list must not be empty"));
+    }
+    for (i, server) in config.servers.iter().enumerate() {
+        if server.url.is_empty() {
+            return Err(anyhow!("servers[{}].url must not be empty", i));
+        }
+    }
+    let segments: Vec<&str> = config.path.split('/').collect();
+    if segments.len() != 3 || segments.iter().any(|s| s.is_empty()) {
+        return Err(anyhow!(
+            "path must follow the KBS resource format 'repo/type/tag', got: '{}'",
+            config.path
+        ));
+    }
+    config
+        .offline_key_path
+        .as_deref()
+        .filter(|p| !p.is_empty())
+        .ok_or_else(|| anyhow!("offline_key_path is required when offline is true"))
+}
+
+fn write_key_file(key_path: &str, key_json: &str) -> Result<()> {
+    let mut f = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(key_path)
+        .with_context(|| format!("Failed to create key file {}", key_path))?;
+    f.write_all(key_json.as_bytes())?;
+    f.sync_all()?;
+    Ok(())
+}
+
+fn encrypt_offline(config: &Config, input: &[u8]) -> Result<()> {
+    let key_path = validate_offline_config(config)?;
+
+    let (jwe_token, key_json) = encrypt_offline_core(config, input)?;
+
+    write_key_file(key_path, &key_json)
+        .with_context(|| format!("Failed to write key to {}", key_path))?;
+
+    io::stdout()
+        .write_all(jwe_token.as_bytes())
+        .context("Error writing the token on stdout")?;
 
     Ok(())
 }
@@ -1049,5 +1175,245 @@ mod tests {
         use clap::CommandFactory;
         let cmd = Cli::command();
         assert_eq!(cmd.get_version().unwrap(), env!("CARGO_PKG_VERSION"));
+    }
+
+    #[test]
+    fn test_generate_local_jwk_produces_valid_key() {
+        let (jwk, key) = generate_local_jwk().unwrap();
+
+        assert_eq!(key.key_type, "oct");
+        assert!(!key.key.is_empty());
+
+        assert_eq!(key.key.len(), 32);
+        assert!(key.key.chars().all(|c| c.is_ascii_hexdigit()));
+
+        assert_eq!(jwk.key_type(), "oct");
+    }
+
+    #[test]
+    fn test_generate_local_jwk_produces_unique_keys() {
+        let (_, key1) = generate_local_jwk().unwrap();
+        let (_, key2) = generate_local_jwk().unwrap();
+
+        assert_ne!(key1.key, key2.key);
+    }
+
+    fn make_offline_config() -> Config {
+        Config {
+            servers: vec![Server {
+                url: "http://kbs.example.com".to_string(),
+                cert: String::new(),
+            }],
+            path: "test/key/path".to_string(),
+            initdata: None,
+            num_retries: None,
+            attestation_key: None,
+            offline: true,
+            offline_key_path: Some("/tmp/test_key.json".to_string()),
+        }
+    }
+
+    #[test]
+    fn test_encrypt_offline_produces_valid_jwe() {
+        let config = make_offline_config();
+        let plaintext = b"my-secret-luks-passphrase";
+
+        let (jwe_token, key_json) = encrypt_offline_core(&config, plaintext).unwrap();
+
+        let hdr = josekit::jwt::decode_header(&jwe_token).unwrap();
+        let clevis = hdr.claim("clevis").unwrap();
+        let clevis: ClevisHeader = serde_json::from_value(clevis.clone()).unwrap();
+        assert_eq!(clevis.pin, "trustee");
+        assert_eq!(clevis.servers.len(), 1);
+        assert_eq!(clevis.servers[0].url, "http://kbs.example.com");
+        assert_eq!(clevis.path, "test/key/path");
+
+        let key: Key = serde_json::from_str(&key_json).unwrap();
+        assert_eq!(key.key_type, "oct");
+
+        // Simulate the decrypt path: set_key_value(&key.key) matches fetch_and_prepare_jwk
+        let mut jwk = Jwk::new("oct");
+        jwk.set_key_value(&key.key);
+        jwk.set_key_operations(vec!["encrypt", "decrypt"]);
+        let decrypter = Dir.decrypter_from_jwk(&jwk).unwrap();
+        let (payload, _) = josekit::jwe::deserialize_compact(&jwe_token, &decrypter).unwrap();
+        assert_eq!(payload, plaintext);
+    }
+
+    #[test]
+    fn test_encrypt_offline_config_from_json() {
+        let json = r#"{"servers":[{"url":"http://kbs.example.com","cert":""}],"path":"test/key/path","offline":true,"offline_key_path":"/tmp/key.json"}"#;
+        let config: Config = serde_json::from_str(json).unwrap();
+        assert!(config.offline);
+        assert_eq!(config.offline_key_path.as_deref(), Some("/tmp/key.json"));
+
+        let (jwe_token, _) = encrypt_offline_core(&config, b"passphrase").unwrap();
+        let hdr = josekit::jwt::decode_header(&jwe_token).unwrap();
+        let clevis = hdr.claim("clevis").unwrap();
+        let clevis: ClevisHeader = serde_json::from_value(clevis.clone()).unwrap();
+        assert_eq!(clevis.pin, "trustee");
+    }
+
+    #[test]
+    fn test_offline_defaults_to_false() {
+        let json =
+            r#"{"servers":[{"url":"http://kbs.example.com","cert":""}],"path":"test/key/path"}"#;
+        let config: Config = serde_json::from_str(json).unwrap();
+        assert!(!config.offline);
+        assert!(config.offline_key_path.is_none());
+    }
+
+    #[test]
+    fn test_encrypt_offline_invalid_config() {
+        let result: std::result::Result<Config, _> = serde_json::from_str("not-valid-json");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_encrypt_offline_writes_key_to_file() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let key_path = dir.path().join("offline_key.json");
+        let config = Config {
+            servers: vec![Server {
+                url: "http://kbs.example.com".to_string(),
+                cert: String::new(),
+            }],
+            path: "test/key/path".to_string(),
+            initdata: None,
+            num_retries: None,
+            attestation_key: None,
+            offline: true,
+            offline_key_path: Some(key_path.to_str().unwrap().to_string()),
+        };
+
+        let result = encrypt_offline(&config, b"my-passphrase");
+        assert!(result.is_ok());
+
+        let metadata = fs::metadata(&key_path).unwrap();
+        assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
+
+        let written = fs::read_to_string(&key_path).unwrap();
+        let key: Key = serde_json::from_str(&written).unwrap();
+        assert_eq!(key.key_type, "oct");
+    }
+
+    #[test]
+    fn test_encrypt_offline_refuses_overwrite() {
+        let dir = tempfile::tempdir().unwrap();
+        let key_path = dir.path().join("existing_key.json");
+        fs::write(&key_path, "old-key").unwrap();
+
+        let config = Config {
+            servers: vec![Server {
+                url: "http://kbs.example.com".to_string(),
+                cert: String::new(),
+            }],
+            path: "test/key/path".to_string(),
+            initdata: None,
+            num_retries: None,
+            attestation_key: None,
+            offline: true,
+            offline_key_path: Some(key_path.to_str().unwrap().to_string()),
+        };
+
+        let result = encrypt_offline(&config, b"my-passphrase");
+        assert!(result.is_err());
+
+        let content = fs::read_to_string(&key_path).unwrap();
+        assert_eq!(content, "old-key");
+    }
+
+    #[test]
+    fn test_encrypt_offline_missing_key_path() {
+        let config = Config {
+            servers: vec![Server {
+                url: "http://kbs.example.com".to_string(),
+                cert: String::new(),
+            }],
+            path: "test/key/path".to_string(),
+            initdata: None,
+            num_retries: None,
+            attestation_key: None,
+            offline: true,
+            offline_key_path: None,
+        };
+
+        let result = encrypt_offline(&config, b"my-passphrase");
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("offline_key_path is required")
+        );
+    }
+
+    #[test]
+    fn test_validate_offline_config_empty_servers() {
+        let config = Config {
+            servers: vec![],
+            path: "test/key/path".to_string(),
+            initdata: None,
+            num_retries: None,
+            attestation_key: None,
+            offline: true,
+            offline_key_path: Some("/tmp/key.json".to_string()),
+        };
+
+        let result = validate_offline_config(&config);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("servers list must not be empty")
+        );
+    }
+
+    #[test]
+    fn test_validate_offline_config_empty_url() {
+        let config = Config {
+            servers: vec![Server {
+                url: String::new(),
+                cert: String::new(),
+            }],
+            path: "test/key/path".to_string(),
+            initdata: None,
+            num_retries: None,
+            attestation_key: None,
+            offline: true,
+            offline_key_path: Some("/tmp/key.json".to_string()),
+        };
+
+        let result = validate_offline_config(&config);
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("url must not be empty")
+        );
+    }
+
+    #[test]
+    fn test_validate_offline_config_invalid_path() {
+        let config = Config {
+            servers: vec![Server {
+                url: "http://kbs.example.com".to_string(),
+                cert: String::new(),
+            }],
+            path: "only-two/segments".to_string(),
+            initdata: None,
+            num_retries: None,
+            attestation_key: None,
+            offline: true,
+            offline_key_path: Some("/tmp/key.json".to_string()),
+        };
+
+        let result = validate_offline_config(&config);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("repo/type/tag"));
     }
 }
