@@ -547,7 +547,7 @@ fn build_initdata(config: &Config) -> Result<Option<String>> {
             let data: HashMap<String, String> = serde_json::from_str(s)
                 .map_err(|e| anyhow!("Failed to parse config initdata: {e}"))?;
             toml::to_string(&Initdata {
-                version: env!("CARGO_PKG_VERSION").to_string(),
+                version: "0.1.0".to_string(),
                 algorithm: "sha256".to_string(),
                 data,
             })
