@@ -657,6 +657,9 @@ enum Commands {
     Encrypt {
         /// Input data or arguments
         config: String,
+        /// Confirm all prompts. Included for compatibility reasons, has no effect
+        #[arg(short)]
+        yes: bool,
     },
     /// Decrypt the input data
     Decrypt,
@@ -666,7 +669,7 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Encrypt { config } => encrypt(&config),
+        Commands::Encrypt { config, yes: _ } => encrypt(&config),
         Commands::Decrypt => decrypt(),
     }
 }
