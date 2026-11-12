@@ -107,6 +107,9 @@ pub struct Config {
     pub initdata: Option<String>,
     pub num_retries: Option<NumRetries>,
     pub attestation_key: Option<AttestationKey>,
+    #[serde(default)]
+    pub offline: bool,
+    pub offline_key_path: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
