@@ -9,7 +9,7 @@ use clevis_pin_trustee_lib::*;
 use josekit::jwe::alg::direct::DirectJweAlgorithm::Dir;
 use josekit::jwk::Jwk;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::io::{self, Read, Write};
 use std::path::Path;
 use std::process::Command as StdCommand;
@@ -447,27 +447,43 @@ fn attestation_key_handle(attestation_key: &Option<AttestationKey>) -> Result<()
     )
 }
 
+/// Prepare `initdata` for storage in the JWE header. The documented
+/// input format (a JSON object serialized as a string) is wrapped
+/// into the TOML `Initdata` envelope; the stored header format is
+/// validated and passed through verbatim, so that configs taken
+/// from `clevis luks list` round-trip through encrypt. Passing the
+/// stored form through byte-for-byte matters: the trustee
+/// attestation service hashes the whole initdata string and verifies
+/// the digest against the TPM-measured initdata, so any
+/// re-serialization (key sorting, field normalization) would break
+/// the binding's unlock after an edit.
+fn prepare_initdata(s: &str) -> Result<String> {
+    match serde_json::from_str::<BTreeMap<String, String>>(s) {
+        Ok(data) => toml::to_string(&Initdata {
+            version: "0.1.0".to_string(),
+            algorithm: "sha256".to_string(),
+            data,
+        })
+        .map_err(|e| anyhow!("Failed to serialize initdata: {e}")),
+        Err(json_err) => {
+            toml::from_str::<Initdata>(s).map_err(|toml_err| {
+                anyhow!("Failed to parse config initdata as a JSON object ({json_err}) or as the stored TOML envelope ({toml_err})")
+            })?;
+            Ok(s.to_string())
+        }
+    }
+}
+
 fn encrypt(config: &str) -> Result<()> {
     let config: Config =
         serde_json::from_str(config).map_err(|e| anyhow!("Failed to parse config JSON: {}", e))?;
 
     attestation_key_handle(&config.attestation_key)?;
 
-    let initdata_str = config.initdata.as_ref();
-    let initdata_data: Option<HashMap<String, String>> = initdata_str
-        .map(|s| {
-            serde_json::from_str(s).map_err(|e| anyhow!("Failed to parse config initdata: {e}"))
-        })
-        .transpose()?;
-    let initdata = initdata_data
-        .map(|data| {
-            toml::to_string(&Initdata {
-                version: "0.1.0".to_string(),
-                algorithm: "sha256".to_string(),
-                data,
-            })
-            .map_err(|e| anyhow!("Failed to serialize initdata: {e}"))
-        })
+    let initdata = config
+        .initdata
+        .as_ref()
+        .map(|s| prepare_initdata(s))
         .transpose()?;
 
     let mut input = Vec::new();
@@ -1059,5 +1075,51 @@ mod tests {
         use clap::CommandFactory;
         let cmd = Cli::command();
         assert_eq!(cmd.get_version().unwrap(), env!("CARGO_PKG_VERSION"));
+    }
+
+    #[test]
+    fn test_prepare_initdata_json_input() {
+        let stored = prepare_initdata(r#"{"foo":"bar"}"#).unwrap();
+        assert_eq!(
+            stored,
+            "version = \"0.1.0\"\nalgorithm = \"sha256\"\n\n[data]\nfoo = \"bar\"\n"
+        );
+    }
+
+    #[test]
+    fn test_prepare_initdata_stored_toml_verbatim() {
+        // Keys deliberately in non-sorted order with irregular
+        // spacing: a re-serializing implementation would reorder or
+        // normalize them and fail this test.
+        let stored =
+            "version = \"0.1.0\"\nalgorithm = \"sha256\"\n\n[data]\nzzz = \"1\"\n  aaa = \"2\"\n";
+        assert_eq!(prepare_initdata(stored).unwrap(), stored);
+    }
+
+    #[test]
+    fn test_prepare_initdata_preserves_envelope_fields() {
+        let stored = "version = \"9.9.9\"\nalgorithm = \"sha512\"\n\n[data]\nfoo = \"bar\"\n";
+        assert_eq!(prepare_initdata(stored).unwrap(), stored);
+    }
+
+    #[test]
+    fn test_prepare_initdata_bare_toml_rejected() {
+        assert!(prepare_initdata(r#"foo = "bar""#).is_err());
+    }
+
+    #[test]
+    fn test_prepare_initdata_non_string_json_rejected() {
+        assert!(prepare_initdata(r#"{"n":5}"#).is_err());
+    }
+
+    #[test]
+    fn test_prepare_initdata_invalid() {
+        assert!(prepare_initdata("not an initdata config").is_err());
+    }
+
+    #[test]
+    fn test_initdata_roundtrip_fixpoint() {
+        let stored = prepare_initdata(r#"{"foo":"bar"}"#).unwrap();
+        assert_eq!(prepare_initdata(&stored).unwrap(), stored);
     }
 }
