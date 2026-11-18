@@ -4,7 +4,7 @@
 // SPDX-License-Identifier: MIT
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum NumRetries {
@@ -120,7 +120,7 @@ pub struct Key {
 pub struct Initdata {
     pub version: String,
     pub algorithm: String,
-    pub data: HashMap<String, String>,
+    pub data: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
