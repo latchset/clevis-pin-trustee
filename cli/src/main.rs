@@ -566,7 +566,7 @@ fn build_initdata(config: &Config) -> Result<Option<String>> {
         .initdata
         .as_ref()
         .map(|s| {
-            let data: HashMap<String, String> = serde_json::from_str(s)
+            let data: BTreeMap<String, String> = serde_json::from_str(s)
                 .map_err(|e| anyhow!("Failed to parse config initdata: {e}"))?;
             toml::to_string(&Initdata {
                 version: "0.1.0".to_string(),
@@ -589,10 +589,12 @@ fn encrypt_offline_core(config: &Config, input: &[u8]) -> Result<(String, String
 
     let private_hdr = ClevisHeader {
         pin: "trustee".to_string(),
-        servers: config.servers.clone(),
-        path: config.path.clone(),
-        initdata,
-        num_retries: config.num_retries.clone(),
+        trustee: ClevisConfig {
+            servers: config.servers.clone(),
+            path: config.path.clone(),
+            initdata: initdata.clone(),
+            num_retries: config.num_retries.clone(),
+        },
     };
 
     let mut hdr = josekit::jwe::JweHeader::new();
@@ -1296,9 +1298,9 @@ mod tests {
         let clevis = hdr.claim("clevis").unwrap();
         let clevis: ClevisHeader = serde_json::from_value(clevis.clone()).unwrap();
         assert_eq!(clevis.pin, "trustee");
-        assert_eq!(clevis.servers.len(), 1);
-        assert_eq!(clevis.servers[0].url, "http://kbs.example.com");
-        assert_eq!(clevis.path, "test/key/path");
+        assert_eq!(clevis.trustee.servers.len(), 1);
+        assert_eq!(clevis.trustee.servers[0].url, "http://kbs.example.com");
+        assert_eq!(clevis.trustee.path, "test/key/path");
 
         let key: Key = serde_json::from_str(&key_json).unwrap();
         assert_eq!(key.key_type, "oct");
